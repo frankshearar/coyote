@@ -156,6 +156,8 @@ namespace Microsoft.Coyote.Rewriting
                     return true;
                 }
                 else if (type.Name is nameof(System.Threading.ExecutionContext) ||
+                    type.Name is nameof(System.Threading.Barrier) ||
+                    type.Name is nameof(System.Threading.CountdownEvent) ||
                     type.Name is nameof(System.Threading.ManualResetEventSlim) ||
                     type.Name is nameof(System.Threading.Mutex) ||
                     type.Name is nameof(System.Threading.ReaderWriterLock) ||

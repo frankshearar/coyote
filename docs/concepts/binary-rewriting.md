@@ -26,6 +26,14 @@ To learn how to test your application after rewriting your binaries with Coyote,
 [here](../get-started/using-coyote.md), as well as check out our tutorial on [writing your first
 concurrency unit test](../tutorials/first-concurrency-unit-test.md).
 
+### Choosing the right Coyote host
+
+Coyote ships a host for each supported .NET version. Rewriting injects references to the runtime of
+the host that performs it, so you must run the host that matches the .NET major version targeted by
+the assembly: use the `net8.0` Coyote host to rewrite a `net8.0` assembly and the `net10.0` host to
+rewrite a `net10.0` assembly. If the versions do not match, `coyote rewrite` reports an error naming
+both versions and leaves the assembly unmodified.
+
 ### Configuration
 
 If you have multiple binaries to rewrite, then you should provide a JSON rewriting configuration
@@ -105,6 +113,37 @@ CosmosDB) with some in-memory mock implementation to make your test fast and eff
 you can already get tests up and running without requiring to mock every single thing, making the
 experience pay-as-you-go. And our plan is that as partially-controlled exploration improves over
 time, you transparently also get better coverage without having to do much from your side.
+
+### How timeouts are modeled
+
+The controlled scheduler serializes your program and decides itself when each operation runs, so it
+does not measure wall-clock time. Rewritten synchronization APIs that accept a timeout therefore do
+not treat that timeout as a source of nondeterminism during systematic testing:
+
+- A **finite non-zero** timeout is explored as if it was infinite, so the wait completes when the
+  operation that it is waiting for completes. Racing the wait against its timeout would instead
+  make every wait fail in some schedules, no matter how large the timeout is, reporting timeouts
+  that the program is not expected to observe and hiding the bugs that happen after the wait
+  succeeds. `Task.Wait`, `Task.WaitAll`, `Task.WaitAny`, `Task.WaitAsync`, `Monitor.Wait`,
+  `SemaphoreSlim.Wait`, `SemaphoreSlim.WaitAsync`, `WaitHandle.WaitOne`, `WaitHandle.WaitAll`,
+  `WaitHandle.WaitAny` and `Thread.Join` all follow this rule. The exception is `Lock.TryEnter`,
+  which reports a finite non-zero timeout as unsupported rather than blocking indefinitely on a
+  lock that its caller expects to give up on.
+- If no operation can ever complete such a wait, then the runtime reports it as a **deadlock**,
+  which is how it reports any other wait that cannot be satisfied.
+- Where the API can return without giving any other operation a chance to run first, a **zero**
+  timeout keeps its production meaning: `Task.WaitAsync` throws a `TimeoutException`, and
+  `SemaphoreSlim.Wait`, `SemaphoreSlim.WaitAsync`, `WaitHandle.WaitOne` and `Lock.TryEnter` report
+  that they did not acquire the resource.
+
+This policy does not change how cancellation is observed. Where the API takes a cancellation token
+that Coyote controls, such as `Task.WaitAsync`, a wait with a finite timeout still completes as
+canceled when the token is canceled, and a token that is already canceled when the wait starts
+takes precedence over the timeout, exactly as it does in production.
+
+Systematic fuzzing is different: it executes the program on real threads and in real time, only
+injecting delays in between operations. Timeouts there keep their wall-clock meaning and are
+handled by the uncontrolled .NET runtime.
 
 ### Quality of life improvements through rewriting
 
