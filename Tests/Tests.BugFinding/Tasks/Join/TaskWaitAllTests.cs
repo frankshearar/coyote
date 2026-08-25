@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Coyote.Specifications;
@@ -237,5 +238,20 @@ namespace Microsoft.Coyote.BugFinding.Tests
             },
             replay: true);
         }
+
+#if NET10_0_OR_GREATER
+        [Fact(Timeout = 5000)]
+        public void TestWaitAllEnumerableWithAlreadyCanceledToken()
+        {
+            this.TestWithException<OperationCanceledException>(() =>
+            {
+                using var source = new CancellationTokenSource();
+                source.Cancel();
+                IEnumerable<Task> tasks = new[] { new TaskCompletionSource<bool>().Task };
+                Task.WaitAll(tasks, source.Token);
+            },
+            replay: true);
+        }
+#endif
     }
 }

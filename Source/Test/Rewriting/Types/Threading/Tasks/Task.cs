@@ -212,6 +212,168 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             return runtime.ScheduleDelay(delay, cancellationToken);
         }
 
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Creates a task that completes after a specified time interval.
+        /// </summary>
+        public static SystemTask Delay(TimeSpan delay, TimeProvider timeProvider) =>
+            Delay(delay, timeProvider, default);
+
+        /// <summary>
+        /// Creates a task that completes after a specified time interval.
+        /// </summary>
+        public static SystemTask Delay(TimeSpan delay, TimeProvider timeProvider,
+            SystemCancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(timeProvider);
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy is SchedulingPolicy.None)
+            {
+                return SystemTask.Delay(delay, timeProvider, cancellationToken);
+            }
+
+            if (!ReferenceEquals(timeProvider, TimeProvider.System))
+            {
+                const string message = "Custom time providers are not supported in systematic testing.";
+                runtime.NotifyAssertionFailure(message);
+                return FromException(new NotSupportedException(message));
+            }
+
+            return runtime.ScheduleDelay(delay, cancellationToken);
+        }
+#endif
+
+#if NET
+        /// <summary>
+        /// Waits asynchronously for the task to complete or for cancellation to be requested.
+        /// </summary>
+        public static SystemTask WaitAsync(SystemTask task, SystemCancellationToken cancellationToken)
+        {
+            SystemTask result = task.WaitAsync(cancellationToken);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(result);
+            return result;
+        }
+
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout.
+        /// </summary>
+        public static SystemTask WaitAsync(SystemTask task, TimeSpan timeout) =>
+            WaitAsync(task, timeout, default(SystemCancellationToken));
+
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout.
+        /// </summary>
+        public static SystemTask WaitAsync(SystemTask task, TimeSpan timeout, TimeProvider timeProvider) =>
+            WaitAsync(task, timeout, timeProvider, default);
+#endif
+
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout or for cancellation.
+        /// </summary>
+        public static SystemTask WaitAsync(SystemTask task, TimeSpan timeout,
+            SystemCancellationToken cancellationToken)
+        {
+            ValidateTimeout(timeout);
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy is SchedulingPolicy.None)
+            {
+                return task.WaitAsync(timeout, cancellationToken);
+            }
+
+            return WaitAsync(task, timeout, runtime, cancellationToken);
+        }
+
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout or for cancellation.
+        /// </summary>
+        public static SystemTask WaitAsync(SystemTask task, TimeSpan timeout, TimeProvider timeProvider,
+            SystemCancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(timeProvider);
+            ValidateTimeout(timeout);
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy is SchedulingPolicy.None)
+            {
+                return task.WaitAsync(timeout, timeProvider, cancellationToken);
+            }
+
+            if (!ReferenceEquals(timeProvider, TimeProvider.System))
+            {
+                const string message = "Custom time providers are not supported in systematic testing.";
+                runtime.NotifyAssertionFailure(message);
+                return FromException(new NotSupportedException(message));
+            }
+
+            return WaitAsync(task, timeout, runtime, cancellationToken);
+        }
+#endif
+
+        private static SystemTask WaitAsync(SystemTask task, TimeSpan timeout,
+            CoyoteRuntime runtime, SystemCancellationToken cancellationToken)
+        {
+            if (task.IsCompleted)
+            {
+                // An already completed task takes precedence over both cancellation and the
+                // timeout, which matches the uncontrolled semantics of this API.
+                runtime.RegisterKnownControlledTask(task);
+                return task;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // An already canceled token deterministically takes precedence over the timeout,
+                // which matches the uncontrolled semantics of this API.
+                SystemTask canceled = SystemTask.FromCanceled(cancellationToken);
+                runtime.RegisterKnownControlledTask(canceled);
+                return canceled;
+            }
+
+            if (timeout == System.Threading.Timeout.InfiniteTimeSpan)
+            {
+                return WaitAsync(task, cancellationToken);
+            }
+
+            if ((long)timeout.TotalMilliseconds is 0)
+            {
+                // A zero timeout expires before the task is given any chance to complete, so it
+                // deterministically wins, which matches the uncontrolled semantics of this API.
+                return FromException(new TimeoutException());
+            }
+
+            if (runtime.SchedulingPolicy is SchedulingPolicy.Interleaving)
+            {
+                // Systematic testing does not model the passage of wall-clock time, so a finite
+                // timeout must not be explored as an operation racing the task to complete the
+                // wait, else the wait times out spuriously in some schedules, no matter how large
+                // the timeout is. Instead, the wait is explored as if the timeout was infinite,
+                // which is how the runtime models the timeout of the other controlled wait APIs,
+                // such as 'Task.Wait', 'Task.WaitAll', 'Monitor.Wait' and 'SemaphoreSlim.Wait'.
+                // A wait that no operation can complete is then reported as a deadlock.
+                return WaitAsync(task, cancellationToken);
+            }
+
+            // Systematic fuzzing executes the program in real time, so the timeout keeps its
+            // wall-clock meaning and is delegated to the uncontrolled runtime.
+            SystemTask result = task.WaitAsync(timeout, cancellationToken);
+            runtime.RegisterKnownControlledTask(result);
+            return result;
+        }
+
+        private static void ValidateTimeout(TimeSpan timeout)
+        {
+            // Match Timer.MaxSupportedTimeout in .NET 8 and .NET 10. The runtime reserves
+            // uint.MaxValue for the -1 millisecond infinite-timeout sentinel.
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
+            long totalMilliseconds = (long)timeout.TotalMilliseconds;
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
+        }
+#endif
+
         /// <summary>
         /// Creates a task that will complete when all tasks in the specified array have completed.
         /// </summary>
@@ -222,6 +384,96 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             CoyoteRuntime.Current.RegisterKnownControlledTask(task);
             return task;
         }
+
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTask> WhenEach(params SystemTask[] tasks)
+        {
+            ArgumentNullException.ThrowIfNull(tasks);
+            return WhenEach((ReadOnlySpan<SystemTask>)tasks);
+        }
+
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTask> WhenEach(params ReadOnlySpan<SystemTask> tasks)
+        {
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy != SchedulingPolicy.Interleaving)
+            {
+                return SystemTask.WhenEach(tasks);
+            }
+
+            return WhenEachState.Iterate<SystemTask>(WhenEachState.Create(runtime, tasks));
+        }
+
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTask> WhenEach(IEnumerable<SystemTask> tasks)
+        {
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy != SchedulingPolicy.Interleaving)
+            {
+                return SystemTask.WhenEach(tasks);
+            }
+
+            return WhenEachState.Iterate<SystemTask>(WhenEachState.Create(runtime, tasks));
+        }
+
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTasks.Task<TResult>> WhenEach<TResult>(
+            params SystemTasks.Task<TResult>[] tasks)
+        {
+            ArgumentNullException.ThrowIfNull(tasks);
+            return WhenEach((ReadOnlySpan<SystemTasks.Task<TResult>>)tasks);
+        }
+
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTasks.Task<TResult>> WhenEach<TResult>(
+            params ReadOnlySpan<SystemTasks.Task<TResult>> tasks)
+        {
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy != SchedulingPolicy.Interleaving)
+            {
+                return SystemTask.WhenEach(tasks);
+            }
+
+            return WhenEachState.Iterate<SystemTasks.Task<TResult>>(WhenEachState.Create(runtime, tasks));
+        }
+
+        /// <summary>
+        /// Creates an asynchronous enumerable that yields tasks as they complete.
+        /// </summary>
+        public static IAsyncEnumerable<SystemTasks.Task<TResult>> WhenEach<TResult>(
+            IEnumerable<SystemTasks.Task<TResult>> tasks)
+        {
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy != SchedulingPolicy.Interleaving)
+            {
+                return SystemTask.WhenEach(tasks);
+            }
+
+            return WhenEachState.Iterate<SystemTasks.Task<TResult>>(WhenEachState.Create(runtime, tasks));
+        }
+
+        /// <summary>
+        /// Creates a task that will complete when all tasks in the specified span have completed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SystemTask WhenAll(params ReadOnlySpan<SystemTask> tasks)
+        {
+            SystemTask task = SystemTask.WhenAll(tasks);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(task);
+            return task;
+        }
+#endif
 
         /// <summary>
         /// Creates a task that will complete when all tasks in the specified enumerable collection have completed.
@@ -245,6 +497,20 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             return task;
         }
 
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Creates a task that will complete when all tasks in the specified span have completed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SystemTasks.Task<TResult[]> WhenAll<TResult>(
+            params ReadOnlySpan<SystemTasks.Task<TResult>> tasks)
+        {
+            SystemTasks.Task<TResult[]> task = SystemTask.WhenAll(tasks);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(task);
+            return task;
+        }
+#endif
+
         /// <summary>
         /// Creates a task that will complete when all tasks in the specified enumerable collection have completed.
         /// </summary>
@@ -266,6 +532,19 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             CoyoteRuntime.Current.RegisterKnownControlledTask(task);
             return task;
         }
+
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Creates a task that will complete when any task in the specified span has completed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SystemTasks.Task<SystemTask> WhenAny(params ReadOnlySpan<SystemTask> tasks)
+        {
+            SystemTasks.Task<SystemTask> task = SystemTask.WhenAny(tasks);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(task);
+            return task;
+        }
+#endif
 
         /// <summary>
         /// Creates a task that will complete when any task in the specified enumerable collection have completed.
@@ -315,6 +594,20 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             return task;
         }
 
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Creates a task that will complete when any task in the specified span has completed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static SystemTasks.Task<SystemTasks.Task<TResult>> WhenAny<TResult>(
+            params ReadOnlySpan<SystemTasks.Task<TResult>> tasks)
+        {
+            SystemTasks.Task<SystemTasks.Task<TResult>> task = SystemTask.WhenAny(tasks);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(task);
+            return task;
+        }
+#endif
+
         /// <summary>
         /// Creates a task that will complete when any task in the specified
         /// enumerable collection have completed.
@@ -334,6 +627,15 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void WaitAll(params SystemTask[] tasks) =>
             WaitAll(tasks, SystemTimeout.Infinite, default);
+
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Waits for all of the provided task objects to complete execution.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void WaitAll(params ReadOnlySpan<SystemTask> tasks) =>
+            WaitAll(tasks.ToArray(), SystemTimeout.Infinite, default);
+#endif
 
         /// <summary>
         /// Waits for all of the provided task objects to complete execution
@@ -365,6 +667,18 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
         public static void WaitAll(SystemTask[] tasks, SystemCancellationToken cancellationToken) =>
             WaitAll(tasks, SystemTimeout.Infinite, cancellationToken);
 
+#if NET10_0_OR_GREATER
+        /// <summary>
+        /// Waits for all tasks in the enumerable collection to complete unless the wait is canceled.
+        /// </summary>
+        public static void WaitAll(IEnumerable<SystemTask> tasks,
+            SystemCancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(tasks);
+            WaitAll(new List<SystemTask>(tasks).ToArray(), cancellationToken);
+        }
+#endif
+
         /// <summary>
         /// Waits for any of the provided task objects to complete execution within a specified
         /// number of milliseconds or until a cancellation token is cancelled.
@@ -372,8 +686,23 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
         public static bool WaitAll(SystemTask[] tasks, int millisecondsTimeout,
             SystemCancellationToken cancellationToken)
         {
+            if (tasks is null)
+            {
+                throw new ArgumentNullException(nameof(tasks));
+            }
+
+            for (int idx = 0; idx < tasks.Length; idx++)
+            {
+                if (tasks[idx] is null)
+                {
+                    throw new ArgumentException("The tasks collection included a null task.", nameof(tasks));
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
             var runtime = CoyoteRuntime.Current;
-            if (runtime.SchedulingPolicy != SchedulingPolicy.None && tasks != null)
+            if (runtime.SchedulingPolicy != SchedulingPolicy.None)
             {
                 // TODO: support timeouts during testing, this would become false if there is a timeout.
                 TaskServices.WaitUntilAllTasksComplete(runtime, tasks);
@@ -619,6 +948,144 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
         public static ConfiguredTaskAwaitable<TResult> ConfigureAwait(
             SystemTasks.Task<TResult> task, bool continueOnCapturedContext) =>
             new ConfiguredTaskAwaitable<TResult>(task, continueOnCapturedContext);
+
+#if NET
+        /// <summary>
+        /// Waits asynchronously for the task to complete or for cancellation to be requested.
+        /// </summary>
+        public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task,
+            SystemCancellationToken cancellationToken)
+        {
+            SystemTasks.Task<TResult> result = task.WaitAsync(cancellationToken);
+            CoyoteRuntime.Current.RegisterKnownControlledTask(result);
+            return result;
+        }
+
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout.
+        /// </summary>
+        public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout) =>
+            WaitAsync(task, timeout, default(SystemCancellationToken));
+
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout.
+        /// </summary>
+        public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout,
+            TimeProvider timeProvider) =>
+            WaitAsync(task, timeout, timeProvider, default);
+#endif
+
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout or for cancellation.
+        /// </summary>
+        public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout,
+            SystemCancellationToken cancellationToken)
+        {
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
+            long totalMilliseconds = (long)timeout.TotalMilliseconds;
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
+
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy is SchedulingPolicy.None)
+            {
+                return task.WaitAsync(timeout, cancellationToken);
+            }
+
+            return WaitAsync(task, timeout, runtime, cancellationToken);
+        }
+
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// Waits asynchronously for the task to complete within the specified timeout or for cancellation.
+        /// </summary>
+        public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout,
+            TimeProvider timeProvider, SystemCancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(timeProvider);
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
+            long totalMilliseconds = (long)timeout.TotalMilliseconds;
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
+
+            var runtime = CoyoteRuntime.Current;
+            if (runtime.SchedulingPolicy is SchedulingPolicy.None)
+            {
+                return task.WaitAsync(timeout, timeProvider, cancellationToken);
+            }
+
+            if (!ReferenceEquals(timeProvider, TimeProvider.System))
+            {
+                const string message = "Custom time providers are not supported in systematic testing.";
+                runtime.NotifyAssertionFailure(message);
+                SystemTasks.Task<TResult> unsupported = SystemTask.FromException<TResult>(
+                    new NotSupportedException(message));
+                runtime.RegisterKnownControlledTask(unsupported);
+                return unsupported;
+            }
+
+            return WaitAsync(task, timeout, runtime, cancellationToken);
+        }
+#endif
+
+        private static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout,
+            CoyoteRuntime runtime, SystemCancellationToken cancellationToken)
+        {
+            if (task.IsCompleted)
+            {
+                // An already completed task takes precedence over both cancellation and the
+                // timeout, which matches the uncontrolled semantics of this API.
+                runtime.RegisterKnownControlledTask(task);
+                return task;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // An already canceled token deterministically takes precedence over the timeout,
+                // which matches the uncontrolled semantics of this API.
+                SystemTasks.Task<TResult> canceled = SystemTask.FromCanceled<TResult>(cancellationToken);
+                runtime.RegisterKnownControlledTask(canceled);
+                return canceled;
+            }
+
+            if (timeout == System.Threading.Timeout.InfiniteTimeSpan)
+            {
+                return WaitAsync(task, cancellationToken);
+            }
+
+            if ((long)timeout.TotalMilliseconds is 0)
+            {
+                // A zero timeout expires before the task is given any chance to complete, so it
+                // deterministically wins, which matches the uncontrolled semantics of this API.
+                SystemTasks.Task<TResult> timedOut = SystemTask.FromException<TResult>(new TimeoutException());
+                runtime.RegisterKnownControlledTask(timedOut);
+                return timedOut;
+            }
+
+            if (runtime.SchedulingPolicy is SchedulingPolicy.Interleaving)
+            {
+                // Systematic testing does not model the passage of wall-clock time, so a finite
+                // timeout must not be explored as an operation racing the task to complete the
+                // wait, else the wait times out spuriously in some schedules, no matter how large
+                // the timeout is. Instead, the wait is explored as if the timeout was infinite,
+                // which is how the runtime models the timeout of the other controlled wait APIs,
+                // such as 'Task.Wait', 'Task.WaitAll', 'Monitor.Wait' and 'SemaphoreSlim.Wait'.
+                // A wait that no operation can complete is then reported as a deadlock.
+                return WaitAsync(task, cancellationToken);
+            }
+
+            // Systematic fuzzing executes the program in real time, so the timeout keeps its
+            // wall-clock meaning and is delegated to the uncontrolled runtime.
+            SystemTasks.Task<TResult> result = task.WaitAsync(timeout, cancellationToken);
+            runtime.RegisterKnownControlledTask(result);
+            return result;
+        }
+#endif
 #pragma warning restore CA1000 // Do not declare static members on generic types
     }
 }

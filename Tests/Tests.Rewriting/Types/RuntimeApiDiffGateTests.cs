@@ -1,0 +1,394 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
+using Xunit;
+using Xunit.Abstractions;
+
+using CoyoteInterlocked = Microsoft.Coyote.Rewriting.Types.Threading.Interlocked;
+using CoyoteMonitor = Microsoft.Coyote.Rewriting.Types.Threading.Monitor;
+using CoyoteSemaphoreSlim = Microsoft.Coyote.Rewriting.Types.Threading.SemaphoreSlim;
+using CoyoteTask = Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task;
+using CoyoteThread = Microsoft.Coyote.Rewriting.Types.Threading.Thread;
+using CoyoteWaitHandle = Microsoft.Coyote.Rewriting.Types.Threading.WaitHandle;
+#if NET10_0_OR_GREATER
+using CoyoteLock = Microsoft.Coyote.Rewriting.Types.Threading.Lock;
+#endif
+
+namespace Microsoft.Coyote.Rewriting.Tests
+{
+    public class RuntimeApiDiffGateTests : BaseRewritingTest
+    {
+        public RuntimeApiDiffGateTests(ITestOutputHelper output)
+            : base(output)
+        {
+        }
+
+        [Fact(Timeout = 5000)]
+        public void TestCurrentRuntimeSignaturesAreExactlyClassified()
+        {
+            IReadOnlyList<ApiMember> runtimeMembers = GetRuntimeMembers();
+            IReadOnlyCollection<string> runtimeSignatures = runtimeMembers.Select(member => member.Signature).ToArray();
+            IReadOnlyCollection<string> supportedSignatures = runtimeMembers
+                .Where(member => member.IsSupported)
+                .Select(member => member.Signature)
+                .ToArray();
+            IReadOnlyCollection<string> replacementSignatures = runtimeMembers
+                .Where(member => member.IsSupported && HasReplacement(member))
+                .Select(member => member.Signature)
+                .ToArray();
+
+            IReadOnlyList<string> errors = ApiDiffGate.Classify(
+                runtimeSignatures,
+                supportedSignatures,
+                replacementSignatures,
+                GetUnsupportedSignatures(runtimeMembers));
+            Assert.True(errors.Count is 0, string.Join(Environment.NewLine, errors));
+        }
+
+        [Fact(Timeout = 5000)]
+        public void TestAddedRuntimeMethodFailsTheGate()
+        {
+            IReadOnlyList<ApiMember> runtimeMembers = GetRuntimeMembers();
+            IReadOnlyCollection<string> runtimeSignatures = runtimeMembers.Select(member => member.Signature)
+                .Concat(new[] { "System.Threading.Tasks.Task|instance|AddedByANewRuntime()|System.Void" })
+                .ToArray();
+            IReadOnlyCollection<string> supportedSignatures = runtimeMembers
+                .Where(member => member.IsSupported)
+                .Select(member => member.Signature)
+                .ToArray();
+            IReadOnlyCollection<string> replacementSignatures = runtimeMembers
+                .Where(member => member.IsSupported && HasReplacement(member))
+                .Select(member => member.Signature)
+                .ToArray();
+
+            string error = Assert.Single(ApiDiffGate.Classify(
+                runtimeSignatures,
+                supportedSignatures,
+                replacementSignatures,
+                GetUnsupportedSignatures(runtimeMembers)));
+            Assert.Contains("Unclassified runtime signature", error);
+            Assert.Contains("AddedByANewRuntime", error);
+        }
+
+        [Fact(Timeout = 5000)]
+        public void TestMissingSupportedReplacementMethodFailsTheGate()
+        {
+            IReadOnlyList<ApiMember> runtimeMembers = GetRuntimeMembers();
+            ApiMember requiredMember = runtimeMembers.First(member => member.IsSupported);
+            IReadOnlyCollection<string> runtimeSignatures = runtimeMembers.Select(member => member.Signature).ToArray();
+            IReadOnlyCollection<string> supportedSignatures = runtimeMembers
+                .Where(member => member.IsSupported)
+                .Select(member => member.Signature)
+                .ToArray();
+            IReadOnlyCollection<string> replacementSignatures = runtimeMembers
+                .Where(member => member.IsSupported && member.Signature != requiredMember.Signature && HasReplacement(member))
+                .Select(member => member.Signature)
+                .ToArray();
+
+            string error = Assert.Single(ApiDiffGate.Classify(
+                runtimeSignatures,
+                supportedSignatures,
+                replacementSignatures,
+                GetUnsupportedSignatures(runtimeMembers)));
+            Assert.Contains("Missing controlled replacement", error);
+            Assert.Contains(requiredMember.Signature, error);
+        }
+
+        [Fact(Timeout = 5000)]
+        public void TestAllowlistedMethodsRequireANonemptyReason()
+        {
+            IReadOnlyList<ApiMember> runtimeMembers = GetRuntimeMembers();
+            ApiMember unsupportedMember = runtimeMembers.Single(member => !member.IsSupported);
+            IReadOnlyCollection<string> runtimeSignatures = runtimeMembers.Select(member => member.Signature).ToArray();
+            IReadOnlyCollection<string> supportedSignatures = runtimeMembers
+                .Where(member => member.IsSupported)
+                .Select(member => member.Signature)
+                .ToArray();
+            IReadOnlyCollection<string> replacementSignatures = runtimeMembers
+                .Where(member => member.IsSupported && HasReplacement(member))
+                .Select(member => member.Signature)
+                .ToArray();
+            var unsupported = new Dictionary<string, string>(GetUnsupportedSignatures(runtimeMembers))
+            {
+                [unsupportedMember.Signature] = string.Empty
+            };
+
+            string error = Assert.Single(ApiDiffGate.Classify(
+                runtimeSignatures,
+                supportedSignatures,
+                replacementSignatures,
+                unsupported));
+            Assert.Contains("nonempty reason", error);
+            Assert.Contains(unsupportedMember.Signature, error);
+        }
+
+        private static IReadOnlyList<ApiMember> GetRuntimeMembers()
+        {
+            var members = new List<ApiMember>
+            {
+#if NET6_0_OR_GREATER
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAsync), typeof(CancellationToken)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAsync), typeof(TimeSpan)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAsync), typeof(TimeSpan), typeof(CancellationToken)),
+#endif
+#if NET8_0_OR_GREATER
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAsync), typeof(TimeSpan), typeof(TimeProvider)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAsync), typeof(TimeSpan), typeof(TimeProvider),
+                    typeof(CancellationToken)),
+#endif
+#if NET6_0_OR_GREATER
+                Create(typeof(Task<>), typeof(Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task<>),
+                    nameof(Task.WaitAsync), typeof(CancellationToken)),
+                Create(typeof(Task<>), typeof(Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task<>),
+                    nameof(Task.WaitAsync), typeof(TimeSpan)),
+                Create(typeof(Task<>), typeof(Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task<>),
+                    nameof(Task.WaitAsync), typeof(TimeSpan), typeof(CancellationToken)),
+#endif
+#if NET8_0_OR_GREATER
+                Create(typeof(Task<>), typeof(Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task<>),
+                    nameof(Task.WaitAsync), typeof(TimeSpan), typeof(TimeProvider)),
+                Create(typeof(Task<>), typeof(Microsoft.Coyote.Rewriting.Types.Threading.Tasks.Task<>),
+                    nameof(Task.WaitAsync), typeof(TimeSpan), typeof(TimeProvider), typeof(CancellationToken)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.Delay), typeof(TimeSpan), typeof(TimeProvider)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.Delay), typeof(TimeSpan), typeof(TimeProvider),
+                    typeof(CancellationToken)),
+#endif
+                Create(typeof(Monitor), typeof(CoyoteMonitor), nameof(Monitor.Enter), typeof(object)),
+                Create(typeof(Monitor), typeof(CoyoteMonitor), nameof(Monitor.Exit), typeof(object)),
+                Create(typeof(Monitor), typeof(CoyoteMonitor), nameof(Monitor.TryEnter), typeof(object)),
+                Create(typeof(Monitor), typeof(CoyoteMonitor), nameof(Monitor.Wait), typeof(object)),
+                Create(typeof(SemaphoreSlim), typeof(CoyoteSemaphoreSlim), nameof(SemaphoreSlim.Wait)),
+                Create(typeof(SemaphoreSlim), typeof(CoyoteSemaphoreSlim), nameof(SemaphoreSlim.WaitAsync)),
+                Create(typeof(SemaphoreSlim), typeof(CoyoteSemaphoreSlim), nameof(SemaphoreSlim.Release)),
+                Create(typeof(Interlocked), typeof(CoyoteInterlocked), nameof(Interlocked.Increment),
+                    typeof(int).MakeByRefType()),
+                Create(typeof(WaitHandle), typeof(CoyoteWaitHandle), nameof(WaitHandle.WaitOne)),
+                Create(typeof(Thread), typeof(CoyoteThread), nameof(Thread.Sleep), typeof(int)),
+                Create(typeof(Task), typeof(CoyoteTask), nameof(Task.RunSynchronously), false)
+            };
+
+#if NET10_0_OR_GREATER
+            members.Add(Create(typeof(Task), typeof(CoyoteTask), nameof(Task.WaitAll),
+                typeof(IEnumerable<Task>), typeof(CancellationToken)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.Enter)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.EnterScope)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.TryEnter)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.TryEnter), typeof(int)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.TryEnter), typeof(TimeSpan)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), nameof(Lock.Exit)));
+            members.Add(Create(typeof(Lock), typeof(CoyoteLock), "get_IsHeldByCurrentThread"));
+#endif
+            return members;
+        }
+
+        private static ApiMember Create(Type runtimeType, Type replacementType, string methodName, params Type[] parameterTypes) =>
+            Create(runtimeType, replacementType, methodName, true, parameterTypes);
+
+        private static ApiMember Create(Type runtimeType, Type replacementType, string methodName, bool isSupported,
+            params Type[] parameterTypes)
+        {
+            MethodInfo method = runtimeType.GetMethods(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .Single(candidate => candidate.Name == methodName && ParametersMatch(candidate, parameterTypes));
+            return new ApiMember(method, replacementType, isSupported);
+        }
+
+        private static bool ParametersMatch(MethodInfo method, IReadOnlyList<Type> parameterTypes)
+        {
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length != parameterTypes.Count)
+            {
+                return false;
+            }
+
+            for (int idx = 0; idx < parameters.Length; idx++)
+            {
+                if (parameters[idx].ParameterType != parameterTypes[idx])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool HasReplacement(ApiMember member)
+        {
+            MethodInfo runtimeMethod = member.RuntimeMethod;
+            foreach (MethodInfo replacementMethod in member.ReplacementType.GetMethods(
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            {
+                if (replacementMethod.Name != runtimeMethod.Name)
+                {
+                    continue;
+                }
+
+                ParameterInfo[] replacementParameters = replacementMethod.GetParameters();
+                ParameterInfo[] runtimeParameters = runtimeMethod.GetParameters();
+                int offset = runtimeMethod.IsStatic ? 0 : 1;
+                if (replacementParameters.Length != runtimeParameters.Length + offset ||
+                    !TypeShapesMatch(replacementMethod.ReturnType, runtimeMethod.ReturnType))
+                {
+                    continue;
+                }
+
+                if (!runtimeMethod.IsStatic &&
+                    !TypeShapesMatch(replacementParameters[0].ParameterType, runtimeMethod.DeclaringType))
+                {
+                    continue;
+                }
+
+                bool matched = true;
+                for (int idx = 0; idx < runtimeParameters.Length; idx++)
+                {
+                    if (!TypeShapesMatch(replacementParameters[idx + offset].ParameterType,
+                        runtimeParameters[idx].ParameterType))
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+
+                if (matched)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TypeShapesMatch(Type left, Type right)
+        {
+#if NET10_0_OR_GREATER
+            if (left == typeof(CoyoteLock.Scope) && right == typeof(Lock.Scope))
+            {
+                return true;
+            }
+#endif
+            return GetTypeShape(left) == GetTypeShape(right);
+        }
+
+        private static string GetTypeShape(Type type)
+        {
+            if (type.IsByRef)
+            {
+                return GetTypeShape(type.GetElementType()) + "&";
+            }
+
+            if (type.IsArray)
+            {
+                return GetTypeShape(type.GetElementType()) + "[]";
+            }
+
+            if (type.IsGenericParameter)
+            {
+                return "*";
+            }
+
+            if (type.IsGenericType)
+            {
+                return type.GetGenericTypeDefinition().FullName + "<" +
+                    string.Join(",", type.GetGenericArguments().Select(GetTypeShape)) + ">";
+            }
+
+            return type.FullName;
+        }
+
+        private static string GetMethodSignature(MethodInfo method)
+        {
+            string instanceKind = method.IsStatic ? "static" : "instance";
+            string parameters = string.Join(",", method.GetParameters().Select(parameter => GetTypeShape(parameter.ParameterType)));
+            return $"{GetTypeShape(method.DeclaringType)}|{instanceKind}|{method.Name}({parameters})|{GetTypeShape(method.ReturnType)}";
+        }
+
+#if NETFRAMEWORK
+        private static Dictionary<string, string> GetUnsupportedSignatures(IEnumerable<ApiMember> members) =>
+#else
+        private static IReadOnlyDictionary<string, string> GetUnsupportedSignatures(IEnumerable<ApiMember> members) =>
+#endif
+            members.Where(member => !member.IsSupported).ToDictionary(
+                member => member.Signature,
+                member => "Task.RunSynchronously is intentionally not controlled because it can execute work on an arbitrary scheduler.");
+
+        private sealed class ApiMember
+        {
+            internal ApiMember(MethodInfo runtimeMethod, Type replacementType, bool isSupported)
+            {
+                this.RuntimeMethod = runtimeMethod;
+                this.ReplacementType = replacementType;
+                this.IsSupported = isSupported;
+                this.Signature = GetMethodSignature(runtimeMethod);
+            }
+
+            internal MethodInfo RuntimeMethod { get; }
+
+            internal Type ReplacementType { get; }
+
+            internal bool IsSupported { get; }
+
+            internal string Signature { get; }
+        }
+
+        private static class ApiDiffGate
+        {
+            internal static IReadOnlyList<string> Classify(
+                IEnumerable<string> runtimeSignatures,
+                IEnumerable<string> supportedSignatures,
+                IEnumerable<string> replacementSignatures,
+                IReadOnlyDictionary<string, string> unsupportedSignatures)
+            {
+                var errors = new List<string>();
+                var supported = new HashSet<string>(supportedSignatures);
+                var replacements = new HashSet<string>(replacementSignatures);
+                var runtime = new HashSet<string>(runtimeSignatures);
+
+                foreach (string signature in runtime)
+                {
+                    if (supported.Contains(signature))
+                    {
+                        if (!replacements.Contains(signature))
+                        {
+                            errors.Add($"Missing controlled replacement for runtime signature '{signature}'.");
+                        }
+                    }
+                    else if (unsupportedSignatures.TryGetValue(signature, out string reason))
+                    {
+                        if (string.IsNullOrWhiteSpace(reason))
+                        {
+                            errors.Add($"Allowlisted runtime signature '{signature}' must have a nonempty reason.");
+                        }
+                    }
+                    else
+                    {
+                        errors.Add($"Unclassified runtime signature '{signature}'.");
+                    }
+                }
+
+                foreach (string signature in supported)
+                {
+                    if (!runtime.Contains(signature))
+                    {
+                        errors.Add($"Supported runtime signature '{signature}' is missing from this runtime.");
+                    }
+                }
+
+                foreach (string signature in unsupportedSignatures.Keys)
+                {
+                    if (!runtime.Contains(signature))
+                    {
+                        errors.Add($"Allowlisted runtime signature '{signature}' is missing from this runtime.");
+                    }
+                }
+
+                return errors;
+            }
+        }
+    }
+}
