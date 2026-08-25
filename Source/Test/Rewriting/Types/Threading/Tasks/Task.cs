@@ -699,6 +699,8 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+
             var runtime = CoyoteRuntime.Current;
             if (runtime.SchedulingPolicy != SchedulingPolicy.None)
             {
