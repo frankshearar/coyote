@@ -363,8 +363,11 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
 
         private static void ValidateTimeout(TimeSpan timeout)
         {
+            // Match Timer.MaxSupportedTimeout in .NET 8 and .NET 10. The runtime reserves
+            // uint.MaxValue for the -1 millisecond infinite-timeout sentinel.
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
             long totalMilliseconds = (long)timeout.TotalMilliseconds;
-            if (totalMilliseconds < -1 || totalMilliseconds > int.MaxValue)
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
             {
                 throw new ArgumentOutOfRangeException(nameof(timeout));
             }
@@ -977,8 +980,9 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
         public static SystemTasks.Task<TResult> WaitAsync(SystemTasks.Task<TResult> task, TimeSpan timeout,
             SystemCancellationToken cancellationToken)
         {
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
             long totalMilliseconds = (long)timeout.TotalMilliseconds;
-            if (totalMilliseconds < -1 || totalMilliseconds > int.MaxValue)
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
             {
                 throw new ArgumentOutOfRangeException(nameof(timeout));
             }
@@ -1000,8 +1004,9 @@ namespace Microsoft.Coyote.Rewriting.Types.Threading.Tasks
             TimeProvider timeProvider, SystemCancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(timeProvider);
+            const long MaxSupportedTimeoutMilliseconds = 0xfffffffe;
             long totalMilliseconds = (long)timeout.TotalMilliseconds;
-            if (totalMilliseconds < -1 || totalMilliseconds > int.MaxValue)
+            if (totalMilliseconds < -1 || totalMilliseconds > MaxSupportedTimeoutMilliseconds)
             {
                 throw new ArgumentOutOfRangeException(nameof(timeout));
             }

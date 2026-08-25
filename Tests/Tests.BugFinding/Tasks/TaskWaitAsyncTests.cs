@@ -21,7 +21,44 @@ namespace Microsoft.Coyote.BugFinding.Tests
 
         private static readonly TimeSpan FiniteTimeout = TimeSpan.FromMilliseconds(10);
         private static readonly TimeSpan LongTimeout = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan RuntimeSupportedLargeTimeout = TimeSpan.FromDays(30);
         private static readonly TimeSpan InvalidTimeout = TimeSpan.FromMilliseconds(-2);
+
+        [Fact(Timeout = 5000)]
+        public void TestWaitAsyncAcceptsRuntimeSupportedLargeTimeout()
+        {
+            using var uncontrolled = new CancellationTokenSource();
+            string outcome = WaitAsyncProvider.GetOutcome(
+                WaitAsyncProvider.CreateCompletedTask(), RuntimeSupportedLargeTimeout, uncontrolled.Token);
+            string resultOutcome = WaitAsyncProvider.GetResultOutcome(
+                WaitAsyncProvider.CreateCompletedResultTask(), RuntimeSupportedLargeTimeout, uncontrolled.Token);
+            string timeProviderOutcome = WaitAsyncProvider.GetOutcomeWithTimeProvider(
+                WaitAsyncProvider.CreateCompletedTask(), RuntimeSupportedLargeTimeout, uncontrolled.Token);
+            string resultTimeProviderOutcome = WaitAsyncProvider.GetResultOutcomeWithTimeProvider(
+                WaitAsyncProvider.CreateCompletedResultTask(), RuntimeSupportedLargeTimeout, uncontrolled.Token);
+            Assert.Equal(WaitAsyncProvider.CompletedOutcome, outcome);
+            Assert.Equal(WaitAsyncProvider.GetCompletedOutcome(WaitAsyncProvider.ExpectedResult), resultOutcome);
+            Assert.Equal(WaitAsyncProvider.CompletedOutcome, timeProviderOutcome);
+            Assert.Equal(WaitAsyncProvider.GetCompletedOutcome(WaitAsyncProvider.ExpectedResult),
+                resultTimeProviderOutcome);
+
+            this.Test(async () =>
+            {
+                using var source = new CancellationTokenSource();
+                await AssertOutcomeAsync(outcome, ct =>
+                    Task.CompletedTask.WaitAsync(RuntimeSupportedLargeTimeout, ct), source.Token);
+                await AssertResultOutcomeAsync(resultOutcome, ct =>
+                    Task.FromResult(WaitAsyncProvider.ExpectedResult).WaitAsync(
+                        RuntimeSupportedLargeTimeout, ct), source.Token);
+                await AssertOutcomeAsync(timeProviderOutcome, ct =>
+                    Task.CompletedTask.WaitAsync(RuntimeSupportedLargeTimeout, TimeProvider.System, ct),
+                    source.Token);
+                await AssertResultOutcomeAsync(resultTimeProviderOutcome, ct =>
+                    Task.FromResult(WaitAsyncProvider.ExpectedResult).WaitAsync(
+                        RuntimeSupportedLargeTimeout, TimeProvider.System, ct), source.Token);
+            },
+            configuration: this.GetConfiguration().WithTestingIterations(1));
+        }
 
         [Fact(Timeout = 5000)]
         public void TestWaitAsyncWithAlreadyCanceledTokenAndIncompleteTask()
